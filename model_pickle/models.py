@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-class Modules:
+class Models:
     def __init__(self,model_1_path,model_2_path):
         self.model_1=joblib.load(model_1_path)
         self.model_2=joblib.load(model_2_path)
