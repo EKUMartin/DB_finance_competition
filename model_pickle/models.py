@@ -146,50 +146,28 @@ class Cov_Model:
         pass
         
     def calculate_changes(self, price_series, vol_series):
-        """
-        20일치 시계열을 받아 변화율 벡터 생성
-        Output: (38,) 크기의 1차원 벡터 (가격변화율 19개 + 거래량변화율 19개)
-        """
-        # 1. 가격 변화율 (Returns)
-        # (P_t - P_t-1) / P_t-1
+        # 1. 가격 변화율
         price_diff = price_series[1:] - price_series[:-1]
         price_returns = price_diff / (price_series[:-1] + 1e-8)
         
-        # 2. 거래량 변화율 (Volume Change)
-        # (V_t - V_t-1) / V_t-1
-        # 거래량은 0인 경우가 많으므로 안전장치 필수
+        # 2. 거래량 변화율
         vol_diff = vol_series[1:] - vol_series[:-1]
         vol_returns = vol_diff / (vol_series[:-1] + 1e-8)
         
-        # 3. 두 특징을 하나로 합침 (Concatenate)
-        # 예: [r1, r2, ..., r19, v1, v2, ..., v19]
-        # 이렇게 하면 가격 움직임과 거래량 움직임 패턴을 동시에 고려하여 상관계수를 계산함
+        # 3. 결합
         combined_features = np.concatenate([price_returns, vol_returns])
-        
         return combined_features
 
     def __call__(self, us_tick, kor_tick):
-        """
-        Args:
-            us_tick: List of arrays (N_us, Window, 2) -> [Adj Close, Volume]
-            kor_tick: List of arrays (N_kr, Window, 5) -> [..., Close, Volume]
-        Returns:
-            corr_matrix: (N_total, N_total) 상관계수 행렬
-        """
         all_assets_vectors = []
         
         # 1. 미국 주식 처리
         for tick in us_tick:
-            # 데이터가 충분하지 않으면(20일 미만) 0으로 채움
             if len(tick) < 2:
-                # 변화율 계산시 길이가 (Window-1)*2가 됨. Window=20이면 38
-                # 임시로 0 벡터 삽입 (길이 38)
                 all_assets_vectors.append(np.zeros(38))
                 continue
-                
-            prices = tick[:, 0] # Adj Close
-            volumes = tick[:, 1] # Volume
-            
+            prices = tick[:, 0]
+            volumes = tick[:, 1]
             vec = self.calculate_changes(prices, volumes)
             all_assets_vectors.append(vec)
 
@@ -198,25 +176,22 @@ class Cov_Model:
             if len(tick) < 2:
                 all_assets_vectors.append(np.zeros(38))
                 continue
-            
-            prices = tick[:, 3] # Close (4번째 컬럼)
-            volumes = tick[:, 4] # Volume (5번째 컬럼)
-            
+            prices = tick[:, 3]
+            volumes = tick[:, 4]
             vec = self.calculate_changes(prices, volumes)
             all_assets_vectors.append(vec)
             
-        # 3. 상관계수 행렬 계산
         if not all_assets_vectors:
             return np.zeros((1, 1))
 
-        # (N_assets, 38) 형태의 행렬
         data_matrix = np.array(all_assets_vectors)
         
-        # numpy corrcoef는 행(Row)을 변수(Asset)로 인식하므로 그대로 넣으면 됨
-        # 결과: (N_assets, N_assets)
-        corr_matrix = np.corrcoef(data_matrix)
+        # [🔥 수정] 경고 메시지 끄기 (Divide by Zero 무시)
+        # 변동성이 0인 자산이 있어도 멈추지 않고 NaN 처리하도록 설정
+        with np.errstate(divide='ignore', invalid='ignore'):
+            corr_matrix = np.corrcoef(data_matrix)
         
-        # 4. NaN 처리 (변동성이 0인 경우 상관계수가 NaN이 나옴 -> 0으로 대체)
+        # NaN을 0으로 변환 (상관관계 없음으로 처리)
         corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
         
         return corr_matrix

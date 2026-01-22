@@ -20,7 +20,7 @@ class Environment:
         self.us=us
         self.kor=kor
         self.kfb=kfb
-        self.risk_lambdas = {0: 0.001, 1: 0.05, 2: 0.1}#안정,불안정, 폭락
+        self.risk_lambdas = {0: 0.1, 1: 0.01, 2: 0.5}#안정,불안정, 폭락
         self.current_regime = 0
         unique_tickers=kor['Tick_id'].unique()
         self.ticker_list=sorted(unique_tickers)
@@ -64,7 +64,8 @@ class Environment:
             port_earnings = self.port_earnings(earnings)
             
             reward = self.get_reward(port_earnings, action)
-
+            # current_val = self.portfolio_value
+            # print(f"Time: {self.dates[self._time_index]} | Action: {action[:3]}... | Value: {current_val:,.0f}")
             self.update_state(action, cost)
             
             self._time_index = t_next
@@ -140,7 +141,7 @@ class Environment:
         regime=self.hmm_model(kospi)
         self.current_regime = int(regime)
         pca=self.pca_model(kor_bf)
-        cov=self.cov(us_tick,kor_tick)
+        cov=self.cov_model(us_tick,kor_tick)
         state = {
             'regime': self.current_regime,   # 스칼라 (0 or 1 or 2)
             'pca': pca,                 # (4,) : PC1~4 값
@@ -171,7 +172,7 @@ class Environment:
         else:
             performance = np.log(v_new / v_old)
         return performance
-def cal_cost(self, action): 
+    def cal_cost(self, action): 
         # action: [Cash_Weight, Stock_1_W, Stock_2_W, ...] (크기: N+1)
         t = self._time_index + 1
         current_prices = []
@@ -220,12 +221,10 @@ def cal_cost(self, action):
         # cost는 update_state나 cal_cost에서 계산된 self.turnover 기반으로 다시 계산하거나 받아옴
         # 여기서는 간단히 turnover 저장된 값 사용
         cost = 0.002 * getattr(self, 'turnover', 0.0)
-        
+        turnover_penalty = 0.5 * getattr(self, 'turnover', 0.0)
         t = self._time_index + 1
         w = self.time_window
-        
-        # [🔥 수정] 리스크 계산 시 주식 비중만 사용해야 함 (Cov Matrix는 주식끼리만 있으므로)
-        stock_weights = action[1:] # Index 0은 현금이므로 제외
+        stock_weights = action[1:]
         
         price_history = []
         for i in range(self.portfolio_size):
@@ -243,7 +242,7 @@ def cal_cost(self, action):
         else:
             risk = 0.0
             
-        reward = performance - cost - risk    
+        reward = performance - cost - risk-turnover_penalty    
         return reward
 
     def update_state(self, target_weights, cost_val):

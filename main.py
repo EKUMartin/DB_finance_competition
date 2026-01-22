@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 import pandas as pd
+import matplotlib.pyplot as plt
 def observation_to_graph(observation, num_us_nodes, device='cpu'):
     """
     Args:
@@ -110,19 +111,20 @@ def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training Start on: {device}")
     
-    # 1. 데이터 로드 (process_data 클래스 사용)
+    # 1. 데이터 로드
     print("Loading Data...")
-    loader = process_data() # DB 연결 및 클래스 인스턴스화
+    loader = process_data()
     
     us_df = loader.fetch_us()
     kospi_df = loader.fetch_kospi()
     kor_df = loader.fetch_kor()
-    bs_df = loader.fetch_bs() # kfb (재무 데이터)
+    bs_df = loader.fetch_bs()
+    
+    # 데이터 전처리 (중복 제거 & 날짜 변환)
     bs_df = bs_df.loc[:, ~bs_df.columns.duplicated()]
     us_df['Date'] = pd.to_datetime(us_df['Date'])
     kospi_df['Date'] = pd.to_datetime(kospi_df['Date'])
     kor_df['Date'] = pd.to_datetime(kor_df['Date'])
-    # bs_df(재무)도 필요하다면 변환
     if 'Date' in bs_df.columns:
         bs_df['Date'] = pd.to_datetime(bs_df['Date'])
 
@@ -130,35 +132,36 @@ def train():
     print(f"KR Stocks: {len(kor_df['Tick_id'].unique())} tickers")
     print(f"US Stocks: {len(us_df['Tick_id'].unique())} tickers")
 
-    # 2. 모델 로드 (HMM, PCA, Cov)
-    # [주의] pickle 파일 경로가 맞는지 확인하세요.
+    # 2. 모델 로드
     hmm = HMM_Model('model_pickle/hmm_model.pkl')
     pca = PCA_Model('model_pickle/pca_model.pkl', 'model_pickle/scaler_model.pkl')
     cov = Cov_Model()
     
-    # 3. 환경(Environment) 초기화
+    # 3. 환경 초기화
     env = Environment(
-        time_window=20,        # 20일치 데이터를 봄
-        budget=100_000_000,    # 초기 자본 1억
+        time_window=20,
+        budget=100_000_000,
         kor=kor_df,
         us=us_df,
-        kfb=bs_df,             # 재무 데이터
+        kfb=bs_df,
         kospi=kospi_df,
         pca_model=pca,
         hmm_model=hmm,
         cov=cov
     )
     
-    # 4. PPO Agent & ActorCritic 모델 초기화
-    # in_channels=5 (우리가 모든 노드 차원을 5로 맞췄으므로)
+    # 4. Agent 초기화
     model = ActorCritic(in_channels=5, hidden=64, heads=4).to(device)
     agent = PPOAgent(model, lr=0.0003, concentration=10.0, device=device)
     memory = Memory()
     
-    # 5. 하이퍼파라미터 설정
-    max_episodes = 500
-    update_timestep = 200 # 200 step마다 PPO 업데이트
+    # 5. 하이퍼파라미터
+    max_episodes = 100
+    update_timestep = 200
     timestep = 0
+    
+    # [🔥 추가 1] 성능 기록용 리스트 생성
+    history = {'reward': [], 'portfolio_value': []}
     
     # =====================================================
     # 학습 시작
@@ -170,19 +173,12 @@ def train():
         while True:
             timestep += 1
             
-            # (1) 데이터 변환 (Env State -> Graph Data)
             num_us = env.us_ticker_size 
             graph_data = observation_to_graph(state, num_us, device=device)
             
-            # (2) Action 선택 (PPO Agent)
-            # 학습 중에는 탐험(Dirichlet)을 위해 stochastic하게 선택
             action, log_prob, value = agent.select_action(graph_data)
-            
-            # (3) 환경 진행 (Step)
             next_state, reward, done, info = env.step(action)
             
-            # (4) 메모리에 저장 (PPO 업데이트용)
-            # GPU 메모리를 아끼기 위해 CPU로 내려서 저장
             memory.states.append(graph_data.to('cpu')) 
             memory.actions.append(action)
             memory.log_probs.append(log_prob)
@@ -193,7 +189,6 @@ def train():
             state = next_state
             episode_reward += reward
             
-            # (5) PPO 업데이트 (일정 step마다 수행)
             if timestep % update_timestep == 0:
                 print(f" >> [Update] PPO Model Update at timestep {timestep}")
                 agent.update(memory)
@@ -202,15 +197,46 @@ def train():
             if done:
                 break
         
-        # 에피소드 종료 후 로그 출력
-        # info 딕셔너리에 'reason' 등이 있다면 같이 출력 가능
+        # [🔥 추가 2] 이번 에피소드 결과 저장
+        history['reward'].append(episode_reward)
+        history['portfolio_value'].append(env.portfolio_value)
+        
         print(f"Episode {episode}/{max_episodes} | Reward: {episode_reward:.2f} | PF Value: {env.portfolio_value:.0f}")
         
-        # 모델 저장 (10 에피소드마다)
         if episode % 10 == 0:
             save_path = f"ppo_gat_ep{episode}.pth"
             torch.save(agent.model.state_dict(), save_path)
             print(f"Model saved to {save_path}")
+
+    # =====================================================
+    # [🔥 추가 3] 학습 종료 후 그래프 그리기 & 저장
+    # =====================================================
+    print("Training Finished. Saving results graph...")
+    
+    plt.figure(figsize=(12, 5))
+    
+    # 1. 보상(Reward) 그래프
+    plt.subplot(1, 2, 1)
+    plt.plot(history['reward'], label='Total Reward', color='blue')
+    plt.title("Training Reward per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.grid(True)
+    
+    # 2. 포트폴리오 가치(Portfolio Value) 그래프
+    plt.subplot(1, 2, 2)
+    plt.plot(history['portfolio_value'], label='Portfolio Value', color='orange')
+    plt.axhline(y=100000000, color='red', linestyle='--', label='Initial Budget') # 원금선
+    plt.title("Final Portfolio Value per Episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Value (KRW)")
+    plt.grid(True)
+    plt.legend()
+    
+    # 그래프 파일로 저장
+    plt.savefig('training_result.png')
+    print("Graph saved as 'training_result.png'. Check your folder!")
+    plt.show() # 창으로도 띄우기
 
 if __name__ == '__main__':
     train()
