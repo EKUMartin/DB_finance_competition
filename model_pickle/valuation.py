@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-
+import joblib
 class Valuation:
     def __init__(self,Netincome,Totalequity,Totalassets,Operatingincome,Revenue,Totalliabilities,Currentassets,Currentliabilities,Pretaxincome,Retainedearnings,Noncurrentliabilities,Noncurrentassets):
         self.Netincome=Netincome
@@ -157,6 +157,8 @@ features_scaled = np.nan_to_num(features_scaled, nan=0.0)
 principalComponents = pca.fit_transform(features_scaled)
 principalDf = pd.DataFrame(data=principalComponents, columns = ['principal component1', 'principal component2',"principal component3","principal component4","principal component5"])
 loadings = pd.DataFrame(pca.components_, columns=feature_names)
+joblib.dump(pca, 'pca_model.pkl')
+joblib.dump(scaler, 'scaler_model.pkl')
 print(loadings.T)
 plt.figure(figsize=(12, 8))
 sns.heatmap(loadings, annot=True, cmap='coolwarm', center=0, fmt='.2f')

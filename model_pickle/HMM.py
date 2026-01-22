@@ -3,10 +3,11 @@ from hmmlearn.hmm import GaussianHMM,GMMHMM
 import pandas as pd
 import numpy as np
 import sys
-BASE = Path(__file__).resolve().parents[1]
+BASE = Path(__file__).resolve().parents[2]
+print(f"현재 잡힌 BASE 경로: {BASE}")
 sys.path.insert(0, str(BASE))
-import data.process_data as pp
 import DB.db_conn as db
+import joblib
 # 20일 MA,  20일의 volatility, 거래량, 종가의 위치((종가-최저가)/(최고가-최저가))
 conn,cur=db.open_db()
 sql="""
@@ -29,3 +30,5 @@ df_processed.dropna(inplace=True)
 feature_cols = ['MA20_slope', 'Disparity', 'Volatility', 'Vol_Change', 'Position']
 X = df_processed[feature_cols]
 model = GaussianHMM(n_components=3, verbose=True, n_iter=100, random_state= 108).fit(X)
+joblib.dump(model, 'hmm_model.pkl')
+print("모델이 hmm_model.pkl로 저장되었습니다.")
