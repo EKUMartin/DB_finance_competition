@@ -105,8 +105,9 @@ class Environment:
         for i in range(self.portfolio_size):
             ticker = self.ticker_list[i]
             bf_data=self.kfb_dict[ticker]
-            matching_data = bf_data[bf_data['Date'].dt.year == ko_year]
-            fin_values = matching_data[fin_cols].values[0]
+            bf_years = pd.to_datetime(bf_data['Date']).dt.year.values
+            matching_indices = np.where(bf_years == int(ko_year))[0]
+            fin_values = bf_data.iloc[matching_indices[0]][fin_cols].values
             kor_bf.append(fin_values)
 
         
@@ -142,17 +143,39 @@ class Environment:
         self.current_regime = int(regime)
         pca=self.pca_model(kor_bf)
         cov=self.cov_model(us_tick,kor_tick)
+        temp_current_prices = []
+        for i in range(self.portfolio_size):
+            ticker = self.ticker_list[i]
+            price = self.kor_dict[ticker].iloc[time_index]['Close']
+            temp_current_prices.append(price)
+        temp_current_prices = np.array(temp_current_prices)
+        
+        # 현재 평가액 계산
+        stock_val = np.sum(self.portfolio * temp_current_prices)
+        total_val = self.budget + stock_val
+        
+        # 비중 계산 (이걸 넘겨줘야 모델이 이해함)
+        if total_val > 0:
+            w_stock = (self.portfolio * temp_current_prices) / total_val
+            w_cash = self.budget / total_val
+            current_weights = np.concatenate(([w_cash], w_stock))
+        else:
+            # 파산 시 현금 100% 처리
+            current_weights = np.zeros(self.portfolio_size + 1)
+            current_weights[0] = 1.0
+
         state = {
-            'regime': self.current_regime,   # 스칼라 (0 or 1 or 2)
-            'pca': pca,                 # (4,) : PC1~4 값
-            'cov': cov,                      # (N_us+N_kr, N_us+N_kr)
-            'kor_feat': kor_features,        # (N_kr, 5)
-            'us_feat': us_features
+            'regime': self.current_regime,
+            'pca': pca,
+            'cov': cov,
+            'kor_feat': kor_features,
+            'us_feat': us_features,
+            'weights': current_weights, # [중요] 주식 수가 아니라 비중을 넘김
         }
         return state
     
     def _is_done(self): #파산했는지 확인)
-        if self.portfolio_value < self._initial_budget * 0.5:
+        if self.portfolio_value < self._initial_budget * 0.2:
             return True
         return False
     
@@ -166,7 +189,7 @@ class Environment:
     
     def port_earnings(self,earnings):#portfolio 수익 계산
         v_old = self.portfolio_value
-        v_new = earnings + self.budget
+        v_new = v_old + earnings
         if v_old <= 0 or v_new <= 0:
             performance = 0
         else:
@@ -221,7 +244,7 @@ class Environment:
         # cost는 update_state나 cal_cost에서 계산된 self.turnover 기반으로 다시 계산하거나 받아옴
         # 여기서는 간단히 turnover 저장된 값 사용
         cost = 0.002 * getattr(self, 'turnover', 0.0)
-        turnover_penalty = 0.5 * getattr(self, 'turnover', 0.0)
+        turnover_penalty = 0.05*current_lambda * getattr(self, 'turnover', 0.0)
         t = self._time_index + 1
         w = self.time_window
         stock_weights = action[1:]
@@ -242,7 +265,7 @@ class Environment:
         else:
             risk = 0.0
             
-        reward = performance - cost - risk-turnover_penalty    
+        reward = 2*performance - cost - risk-turnover_penalty    
         return reward
 
     def update_state(self, target_weights, cost_val):
