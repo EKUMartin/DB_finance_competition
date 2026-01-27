@@ -65,6 +65,6 @@ class ActorCritic(torch.nn.Module):
         A=F.relu(A)
         A=self.linear2(A)
         result=self.act1(A)
-        if result<0.5:
+        if result<0.3:
             weights=old_weight     
         return weights, value, (edge_index_alpha, alpha)

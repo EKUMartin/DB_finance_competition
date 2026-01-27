@@ -20,7 +20,7 @@ class Environment:
         self.us=us
         self.kor=kor
         self.kfb=kfb
-        self.risk_lambdas = {0: 0.1, 1: 0.01, 2: 0.5}#안정,불안정, 폭락
+        self.risk_lambdas = {0: 0, 1: 0.00001, 2: 0.00005}#안정,불안정, 폭락
         self.current_regime = 0
         unique_tickers=kor['Tick_id'].unique()
         self.ticker_list=sorted(unique_tickers)
@@ -175,7 +175,7 @@ class Environment:
         return state
     
     def _is_done(self): #파산했는지 확인)
-        if self.portfolio_value < self._initial_budget * 0.2:
+        if self.portfolio_value < self._initial_budget * 0.5:
             return True
         return False
     
@@ -265,7 +265,7 @@ class Environment:
         else:
             risk = 0.0
             
-        reward = 2*performance - cost - risk-turnover_penalty    
+        reward = 2*performance - cost - risk-turnover_penalty 
         return reward
 
     def update_state(self, target_weights, cost_val):
