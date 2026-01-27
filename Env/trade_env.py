@@ -20,7 +20,7 @@ class Environment:
         self.us=us
         self.kor=kor
         self.kfb=kfb
-        self.risk_lambdas = {0: 0, 1: 0.00001, 2: 0.00005}#안정,불안정, 폭락
+        self.risk_lambdas = {0: 0, 1: 0.000001, 2: 0.000005}#안정,불안정, 폭락
         self.current_regime = 0
         unique_tickers=kor['Tick_id'].unique()
         self.ticker_list=sorted(unique_tickers)

@@ -190,7 +190,7 @@ def train():
         budget=100_000_000,
         kor=kor_df,
         us=us_df,
-        kfb=bs_df,
+        kfb=bs_df, 
         kospi=kospi_df,
         pca_model=pca,
         hmm_model=hmm,
@@ -199,7 +199,7 @@ def train():
     
     # 4. Agent 초기화
     model = ActorCritic(in_channels=5, hidden=64, heads=4, input_size=8).to(device)
-    agent = PPOAgent(model, lr=0.0003, concentration=10.0, device=device)
+    agent = PPOAgent(model, lr=0.0003, concentration=10.0, device=device,ent_coef=0.03)
     memory = Memory()
     
     # 5. 하이퍼파라미터
@@ -216,7 +216,7 @@ def train():
     for episode in range(1, max_episodes + 1):
         state = env.reset()
         episode_reward = 0
-        agent.concentration = 10.0 + (episode * 0.2)
+        agent.concentration = 10 + (episode * 0.2)
         while True:
             timestep += 1
             
