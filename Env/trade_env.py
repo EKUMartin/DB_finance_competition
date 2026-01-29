@@ -20,7 +20,7 @@ class Environment:
         self.us=us
         self.kor=kor
         self.kfb=kfb
-        self.risk_lambdas = {0: 0, 1: 0.000001, 2: 0.000005}#안정,불안정, 폭락
+        self.risk_lambdas = {0: 0, 1: 0.00001, 2: 0.005}#안정,불안정, 폭락
         self.current_regime = 0
         unique_tickers=kor['Tick_id'].unique()
         self.ticker_list=sorted(unique_tickers)
@@ -52,28 +52,70 @@ class Environment:
 
     
     def step(self, action):
-            t = self._time_index
-            t_next = t + 1
-            if t_next+1 >= len(self.dates):
-                return None, 0.0, True, {"reason": "end_of_data", "t": t}
+        t = self._time_index
+        t_next = t + 1
+        
+        # [수정 1] 데이터 끝(만기) 도달 여부 확인
+        # 여기서 바로 리턴하지 않고, 플래그만 세워둡니다.
+        is_end_of_data = (t_next + 1 >= len(self.dates))
+        
+        # 1. 비용 계산
+        cost = self.cal_cost(action)
+        
+        # 2. 시장 수익 계산
+        gross_earnings = self.cal_earnings(action)
+        
+        # 3. 순수익
+        net_earnings = gross_earnings - cost 
+        
+        # 4. 수익률
+        port_earnings = self.port_earnings(net_earnings) 
+        
+        # 5. 기본 보상 (Daily Reward)
+        reward = self.get_reward(port_earnings, action)
+        
+        # 6. 상태 업데이트
+        self.update_state(action, cost)
+        
+        # 7. 종료 조건 체크 (파산 여부)
+        is_bankrupt = self._is_done()
+        
+        # [🔥 핵심 수정] 종료(Done)는 '파산'하거나 '만기'일 때 모두 True
+        done = is_bankrupt or is_end_of_data
+        
+        # 8. [🔥 핵심 수정] 졸업 선물 (Terminal Reward) 주는 로직
+        if done:
+            # 최종 수익률 계산: (최종자산 - 원금) / 원금
+            # 예: 1억 -> 1.2억 (+0.2), 1억 -> 5천만 (-0.5)
+            total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
             
-            cost = self.cal_cost(action)
+            # 보너스 계산 (가중치 100배)
+            # - 파산 시: -0.5 * 100 = -50점 (강력한 처벌)
+            # - 생존 및 수익 시: +0.2 * 100 = +20점 (달콤한 보상)
+            terminal_bonus = total_return * 100.0
             
-            earnings = self.cal_earnings(action)
+            reward += terminal_bonus
             
-            port_earnings = self.port_earnings(earnings)
-            
-            reward = self.get_reward(port_earnings, action)
-            # current_val = self.portfolio_value
-            # print(f"Time: {self.dates[self._time_index]} | Action: {action[:3]}... | Value: {current_val:,.0f}")
-            self.update_state(action, cost)
-            
-            self._time_index = t_next
+            # 로그 출력 (확인용)
+            if is_bankrupt:
+                print(f"💀 Bankrupt! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+            else:
+                print(f"🎉 Survival! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+
+        # 9. 다음 상태 준비
+        self._time_index = t_next
+        
+        # 만약 데이터가 끝났으면 next_state를 구할 수 없으므로 현재 state를 반환하거나 None 처리
+        if is_end_of_data:
+             # 마지막 스텝에서는 next_state가 중요하지 않음 (어차피 done=True라 학습 종료)
+             # 형식상 현재 상태를 리턴해줌
+            next_state = self.observation 
+        else:
             next_state = self._get_state()
-            done = self._is_done()
-            info = {}
-            return next_state, float(reward), bool(done), info
-    
+            
+        info = {}
+        return next_state, float(reward), bool(done), info
+
     def _get_state(self):#입력된 시점의 상태 리턴
         time_index=self._time_index
         time_window=self.time_window
@@ -209,64 +251,93 @@ class Environment:
         stock_val = np.sum(self.portfolio * current_prices)
         total_val = self.budget + stock_val
         
-        # [🔥 수정] 현재 비중(w_old) 계산 시 현금 비중도 포함해야 함
+        # 1. 현재 비중(w_old) 계산
         if total_val > 0:
-            w_stock = (self.portfolio * current_prices) / total_val # 주식 비중
-            w_cash = self.budget / total_val                        # 현금 비중
-            
-            # [Cash, Stock...] 순서로 합침 (Action과 형태 통일)
+            w_stock = (self.portfolio * current_prices) / total_val 
+            w_cash = self.budget / total_val                    
             w_old = np.concatenate(([w_cash], w_stock)) 
         else:
             w_old = np.zeros(self.portfolio_size + 1)
             
-        # 이제 둘 다 (N+1,) 크기이므로 계산 가능
+        # [🔥 수정됨] 들여쓰기를 밖으로 꺼냈습니다. (이제 정상 실행됩니다)
         diff = w_old - action 
-        
-        # 회전율 계산 (현금 변동분은 거래비용 없으므로 주식 부분만 계산해도 됨)
-        # 하지만 전체 diff를 써도 로직상 큰 문제는 없으나, 
-        # 거래세는 '주식을 사고 팔 때'만 발생하므로 주식 부분만 보는 게 정확함.
-        # action[1:] -> 주식 비중 변화
-        
-        # 여기서는 단순하게 전체 변동분의 절반을 Turnover로 가정하거나,
-        # 정확히 하려면 주식 쪽 변동(diff[1:])만 발라내서 계산
         stock_diff = diff[1:] 
-        self.turnover = np.sum(np.abs(stock_diff)) / 2 # 매수+매도 합이므로 2로 나눔 (혹은 max(diff,0) 사용)
         
-        # 비용 계산 (거래세+수수료 등 0.2%)
+        # 회전율 계산
+        raw_turnover = np.sum(np.abs(stock_diff)) / 2
+        
+        # 노이즈 필터링
+        if raw_turnover < 0.03: 
+            self.turnover = 0.0
+        else:
+            self.turnover = raw_turnover
+    
+        # 비용 계산
         cost = total_val * 0.002 * self.turnover
         return cost
 
     def get_reward(self, port_earnings, action):
-        # action: [Cash, Stocks...]
-        performance = port_earnings
-        current_lambda = self.risk_lambdas.get(self.current_regime, 0.01)
-        
-        # cost는 update_state나 cal_cost에서 계산된 self.turnover 기반으로 다시 계산하거나 받아옴
-        # 여기서는 간단히 turnover 저장된 값 사용
-        cost = 0.002 * getattr(self, 'turnover', 0.0)
-        turnover_penalty = 0.05*current_lambda * getattr(self, 'turnover', 0.0)
-        t = self._time_index + 1
-        w = self.time_window
-        stock_weights = action[1:]
-        
-        price_history = []
-        for i in range(self.portfolio_size):
-            ticker = self.ticker_list[i]
-            prices = self.kor_dict[ticker].iloc[t-w : t]['Close'].values
-            price_history.append(prices)
+            # action: [Cash, Stocks...]
             
-        price_history = np.array(price_history).T
-        returns = (price_history[1:] - price_history[:-1]) / (price_history[:-1] + 1e-8)
-        
-        if returns.shape[1] > 1:
-            cov_matrix = np.cov(returns, rowvar=False)
-            # (N,) @ (N,N) @ (N,) -> Scalar
-            risk = current_lambda * np.dot(stock_weights.T, np.dot(cov_matrix, stock_weights))
-        else:
-            risk = 0.0
+            # 1. 수익률 (Performance)
+            # 이미 port_earnings 계산 시 (v_new / v_old)에 거래비용(cost)이 반영되어 있습니다.
+            # 따라서 보상 식에서 cost를 또 뺄 필요가 없습니다.
+            performance = port_earnings*100
             
-        reward = 2*performance - cost - risk-turnover_penalty 
-        return reward
+            # 2. 리스크 (Volatility Penalty)
+            # HMM Regime에 따라 Lambda를 가져옵니다.
+            current_lambda = self.risk_lambdas.get(self.current_regime, 0.01)
+            
+            t = self._time_index + 1
+            w = self.time_window
+            stock_weights = action[1:] # 주식 비중만 추출
+            
+            # 과거 w 기간 동안의 수익률 데이터 준비
+            price_history = []
+            for i in range(self.portfolio_size):
+                ticker = self.ticker_list[i]
+                # [수정] iloc 슬라이싱 범위 안전하게 처리
+                start_idx = max(0, t - w)
+                prices = self.kor_dict[ticker].iloc[start_idx : t]['Close'].values
+                price_history.append(prices)
+                
+            price_history = np.array(price_history).T
+            
+            # 수익률 변환 (Shape: [w-1, N_stocks])
+            returns_hist = (price_history[1:] - price_history[:-1]) / (price_history[:-1] + 1e-8)
+            
+            if returns_hist.shape[0] > 1:
+                cov_matrix = np.cov(returns_hist, rowvar=False)
+                # 포트폴리오 분산 = w.T * Cov * w
+                port_variance = np.dot(stock_weights.T, np.dot(cov_matrix, stock_weights))
+                
+                # 리스크 = lambda * 분산 (일반적인 Mean-Variance Optimization 식)
+                # 리스크 값이 너무 커지지 않도록 스케일 조정 필요할 수 있음
+                risk_penalty = current_lambda * port_variance
+            else:
+                risk_penalty = 0.0
+                
+            # 3. 회전율 페널티 (Turnover Penalty)
+            # 학습 초반에 너무 세게 잡으면 아무것도 안 함. 
+            # performance가 대략 0.01(1%) 내외이므로, 페널티는 그보다 작아야 함 (예: 0.0005)
+            # 기존 0.05 * lambda * turnover는 너무 컸을 수 있음.
+            
+            turnover = getattr(self, 'turnover', 0.0)
+            
+            # [수정] 고정된 작은 상수를 곱하거나, lambda와 무관하게 아주 작게 설정
+            turnover_penalty = 0.001 * turnover 
+            
+            # 4. 최종 보상 계산
+            # 2*performance는 수익 추구를 강조하기 위함 (선택 사항)
+            # cost 항 제거함 (performance에 이미 반영됨)
+            
+            reward = performance - risk_penalty - turnover_penalty
+            
+            # [디버깅용 출력] - 학습이 안될 때 이 주석을 풀어서 값들의 크기(Scale)를 비교해보세요.
+            # if t % 100 == 0:
+            # print(f"R: {reward:.5f} | Perf: {performance:.5f} | Risk: {risk_penalty:.5f} | Turn: {turnover_penalty:.5f}")
+                
+            return reward
 
     def update_state(self, target_weights, cost_val):
         # target_weights: [Cash, Stocks...]
@@ -278,13 +349,25 @@ class Environment:
             current_prices.append(price)
         current_prices = np.array(current_prices)
         
+        # [🔥 여기부터 추가된 부분입니다] 
+        # cost_val이 0이면 (cal_cost에서 Hold로 판정), 
+        # 포트폴리오(주식 수)를 변경하지 않고 가치만 갱신하고 끝냅니다.
+        if cost_val == 0.0:
+            stock_val = np.sum(self.portfolio * current_prices)
+            self.portfolio_value = self.budget + stock_val
+            return # 여기서 함수 종료! (밑에 재분배 로직 실행 안 함)
+        # [🔥 여기까지 추가]
+
+        # -----------------------------------------------------------
+        # 아래는 기존 로직 그대로 실행 (cost_val > 0 일 때만)
+        # -----------------------------------------------------------
+        
         # 거래비용 차감 후 가용 자산
         # cost_val은 금액(won) 단위여야 함
         total_val = self.budget + np.sum(self.portfolio * current_prices)
         available_value = total_val - cost_val
         
-        # [🔥 수정] 현금 비중과 주식 비중 분리
-        # target_cash_w = target_weights[0]
+        # 현금 비중과 주식 비중 분리
         target_stock_w = target_weights[1:]
         
         # 주식 매수 목표 금액
