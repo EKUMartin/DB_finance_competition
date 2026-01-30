@@ -55,64 +55,46 @@ class Environment:
         t = self._time_index
         t_next = t + 1
         
-        # [수정 1] 데이터 끝(만기) 도달 여부 확인
-        # 여기서 바로 리턴하지 않고, 플래그만 세워둡니다.
-        is_end_of_data = (t_next + 1 >= len(self.dates))
+        # 1. [만기 졸업] 데이터가 끝까지 도달했을 때 (End of Data)
+        if t_next + 1 >= len(self.dates):
+            # 여기서 최종 수익률 계산해서 '졸업 선물(Bonus)'을 줍니다.
+            total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
+            terminal_bonus = max(0,total_return * 100.0)  # 수익률% 만큼 보너스 (예: +20%면 +20점)
+            
+            print(f"🎉 End of Data! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+            
+            # 기존에는 reward 0.0이었지만, 이제 terminal_bonus를 리턴합니다.
+            # next_state는 없으므로 None 혹은 현재 state 반환 (어차피 done=True라 학습 종료됨)
+            return self.observation, terminal_bonus, True, {"reason": "end_of_data", "t": t}
         
-        # 1. 비용 계산
+        # -------------------------------------------------------
+        # 기존 로직 유지 (건드리지 않음)
+        # -------------------------------------------------------
         cost = self.cal_cost(action)
         
-        # 2. 시장 수익 계산
-        gross_earnings = self.cal_earnings(action)
+        earnings = self.cal_earnings(action)
         
-        # 3. 순수익
-        net_earnings = gross_earnings - cost 
+        port_earnings = self.port_earnings(earnings)
         
-        # 4. 수익률
-        port_earnings = self.port_earnings(net_earnings) 
-        
-        # 5. 기본 보상 (Daily Reward)
         reward = self.get_reward(port_earnings, action)
         
-        # 6. 상태 업데이트
         self.update_state(action, cost)
         
-        # 7. 종료 조건 체크 (파산 여부)
-        is_bankrupt = self._is_done()
-        
-        # [🔥 핵심 수정] 종료(Done)는 '파산'하거나 '만기'일 때 모두 True
-        done = is_bankrupt or is_end_of_data
-        
-        # 8. [🔥 핵심 수정] 졸업 선물 (Terminal Reward) 주는 로직
-        if done:
-            # 최종 수익률 계산: (최종자산 - 원금) / 원금
-            # 예: 1억 -> 1.2억 (+0.2), 1억 -> 5천만 (-0.5)
-            total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
-            
-            # 보너스 계산 (가중치 100배)
-            # - 파산 시: -0.5 * 100 = -50점 (강력한 처벌)
-            # - 생존 및 수익 시: +0.2 * 100 = +20점 (달콤한 보상)
-            terminal_bonus = total_return * 100.0
-            
-            reward += terminal_bonus
-            
-            # 로그 출력 (확인용)
-            if is_bankrupt:
-                print(f"💀 Bankrupt! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
-            else:
-                print(f"🎉 Survival! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
-
-        # 9. 다음 상태 준비
         self._time_index = t_next
+        next_state = self._get_state()
         
-        # 만약 데이터가 끝났으면 next_state를 구할 수 없으므로 현재 state를 반환하거나 None 처리
-        if is_end_of_data:
-             # 마지막 스텝에서는 next_state가 중요하지 않음 (어차피 done=True라 학습 종료)
-             # 형식상 현재 상태를 리턴해줌
-            next_state = self.observation 
-        else:
-            next_state = self._get_state()
+        # 2. [파산 체크] (Bankruptcy)
+        done = self._is_done()
+        
+        # 여기서 파산했으면 '파산 벌점(Penalty)'을 추가합니다.
+        if done:
+            total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
+            terminal_bonus = total_return * 50 # 파산 시 보통 -50%이므로 -50점이 됨
             
+            reward += terminal_bonus # 기존 reward에 벌점 합산
+            
+            print(f"💀 Bankrupt! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+
         info = {}
         return next_state, float(reward), bool(done), info
 
@@ -282,8 +264,10 @@ class Environment:
             # 1. 수익률 (Performance)
             # 이미 port_earnings 계산 시 (v_new / v_old)에 거래비용(cost)이 반영되어 있습니다.
             # 따라서 보상 식에서 cost를 또 뺄 필요가 없습니다.
-            performance = port_earnings*100
-            
+            if port_earnings<0:
+                performance = port_earnings*10
+            else:
+                performance = port_earnings*10
             # 2. 리스크 (Volatility Penalty)
             # HMM Regime에 따라 Lambda를 가져옵니다.
             current_lambda = self.risk_lambdas.get(self.current_regime, 0.01)
