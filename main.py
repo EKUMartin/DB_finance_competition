@@ -149,12 +149,12 @@ def train():
     
     # 4. Agent 초기화
     model = ActorCritic(in_channels=5, hidden=64, heads=4, input_size=8).to(device)
-    agent = PPOAgent(model, lr=0.00001, concentration=10.0, device=device,ent_coef=0.03)
+    agent = PPOAgent(model, lr=0.0003, concentration=10.0, device=device,ent_coef=0.03)
     memory = Memory()
     
     # 5. 하이퍼파라미터
     max_episodes = 400
-    update_timestep = 300
+    update_timestep = 1000
     timestep = 0
     
     history = {'reward': [], 'portfolio_value': []}
@@ -203,9 +203,7 @@ def train():
             torch.save(agent.model.state_dict(), save_path)
             print(f"Model saved to {save_path}")
 
-    # =====================================================
-    # [🔥 추가 3] 학습 종료 후 그래프 그리기 & 저장
-    # =====================================================
+
     print("Training Finished. Saving results graph...")
     
     plt.figure(figsize=(12, 5))

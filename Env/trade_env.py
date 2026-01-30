@@ -56,15 +56,11 @@ class Environment:
     def step(self, action):
         t = self._time_index
         t_next = t + 1
-        
         if t_next + 1 >= len(self.dates):
             total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
-            terminal_bonus = max(0,total_return * 100.0) 
-            
-            print(f"🎉 End of Data! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
-            return self.observation, terminal_bonus, True, {"reason": "end_of_data", "t": t}
-        
-
+            terminal_bonus =total_return * 100.0 
+            print(f"@@@완주!End of Data!@@@ Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+            return self.observation, terminal_bonus, True, info
         # -------------------------------------------------------
         cost = self.cal_cost(action)
         
@@ -73,7 +69,9 @@ class Environment:
         port_earnings = self.port_earnings(earnings)
         
         reward = self.get_reward(port_earnings, action)
-        
+
+
+
         self.update_state(action, cost)
         
         self._time_index = t_next
@@ -84,12 +82,10 @@ class Environment:
         
         if done:
             total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
-            terminal_bonus = total_return * 50
-            
+            terminal_bonus = total_return * 10000
             reward += terminal_bonus 
-            
-            print(f"💀 Bankrupt! Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
-
+            print(f"###파산!Bankrupt!### Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+        
         info = {}
         return next_state, float(reward), bool(done), info
 
