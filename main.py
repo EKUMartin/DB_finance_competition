@@ -199,7 +199,7 @@ def train():
         print(f"Episode {episode}/{max_episodes} | Reward: {episode_reward:.2f} | PF Value: {env.portfolio_value:.0f}")
         
         if episode_reward>= 20:
-            save_path = f"ppo_gat_ep{episode}.pth"
+            save_path = f"ppo_gat_ep{episode}_reward_{episode_reward}.pth"
             torch.save(agent.model.state_dict(), save_path)
             print(f"Model saved to {save_path}")
 

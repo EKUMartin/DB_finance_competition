@@ -42,7 +42,7 @@ class Environment:
     def reset(self):#포트폴리오,리워드,observation,자산 초기화
         self.portfolio_value=self._initial_budget
         self.portfolio=np.zeros(self.portfolio_size,dtype=np.float32)
-        min_play_steps=1500
+        min_play_steps=2500
         last_possible_start = len(self.dates) - min_play_steps - 1
         self._time_index = random.randint(self.time_window,last_possible_start)
         self.budget=self._initial_budget
@@ -60,6 +60,7 @@ class Environment:
             total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
             terminal_bonus =total_return * 100.0 
             print(f"@@@완주!End of Data!@@@ Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
+            info = {"reason": "end_of_data", "return": total_return}
             return self.observation, terminal_bonus, True, info
         # -------------------------------------------------------
         cost = self.cal_cost(action)
