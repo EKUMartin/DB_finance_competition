@@ -83,7 +83,7 @@ class Environment:
         
         if done:
             total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
-            terminal_bonus = total_return * 10000
+            terminal_bonus = total_return * 100
             reward += terminal_bonus 
             print(f"###파산!Bankrupt!### Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
         
@@ -249,50 +249,65 @@ class Environment:
         return cost
 
     def get_reward(self, port_earnings, action):
-     
-            if port_earnings<0:
-                performance = port_earnings*10
-            else:
-                performance = port_earnings*10
-    
-            current_lambda = self.risk_lambdas.get(self.current_regime, 0.01)
-            
-            t = self._time_index + 1
-            w = self.time_window
-            stock_weights = action[1:] # 주식 비중만 추출
-            
-            # 과거 w 기간 동안의 수익률 데이터 준비
-            price_history = []
-            for i in range(self.portfolio_size):
-                ticker = self.ticker_list[i]
-                
-                start_idx = max(0, t - w)
-                prices = self.kor_dict[ticker].iloc[start_idx : t]['Close'].values
-                price_history.append(prices)
-                
-            price_history = np.array(price_history).T
-            
-            returns_hist = (price_history[1:] - price_history[:-1]) / (price_history[:-1] + 1e-8)
-            
-            if returns_hist.shape[0] > 1:
-                cov_matrix = np.cov(returns_hist, rowvar=False)
-            
-                port_variance = np.dot(stock_weights.T, np.dot(cov_matrix, stock_weights))
-                
-                risk_penalty = current_lambda * port_variance
-            else:
-                risk_penalty = 0.0
-                            
-            turnover = getattr(self, 'turnover', 0.0)
+        # 1. 기본 수익률 보상 (기존 로직 유지)
+        if port_earnings < 0:
+            performance = port_earnings * 10
+        else:
+            performance = port_earnings * 10
 
-            turnover_penalty = 0.001 * turnover             
+        # 2. 리스크 페널티 계산 (샤프 지수 개념 도입)
+        # -----------------------------------------------------------
+        t = self._time_index + 1
+        w = self.time_window
+        stock_weights = action[1:] # 주식 비중만 추출
+        
+        # 과거 w 기간 동안의 수익률 데이터 준비
+        price_history = []
+        for i in range(self.portfolio_size):
+            ticker = self.ticker_list[i]
+            # t 시점까지의 과거 데이터 슬라이싱
+            start_idx = max(0, t - w)
+            prices = self.kor_dict[ticker].iloc[start_idx : t]['Close'].values
+            price_history.append(prices)
             
-            reward = performance - risk_penalty - turnover_penalty
+        price_history = np.array(price_history).T
+        
+        # 일별 수익률 계산
+        returns_hist = (price_history[1:] - price_history[:-1]) / (price_history[:-1] + 1e-8)
+        
+        risk_penalty = 0.0
+        
+        if returns_hist.shape[0] > 1:
+            # (1) 공분산 행렬 계산
+            cov_matrix = np.cov(returns_hist, rowvar=False)
+            
+            # (2) 포트폴리오 분산 (Variance) = w^T * Cov * w
+            port_variance = np.dot(stock_weights.T, np.dot(cov_matrix, stock_weights))
+            
+            # (3) 포트폴리오 표준편차 (Volatility)
+            port_std = np.sqrt(port_variance + 1e-8)
+            
+            # [핵심 변경] Sharpe Ratio 스타일 보상
+            # 수익률(performance)을 표준편차(port_std)로 나누거나, 표준편차에 페널티를 강하게 줌
+            # 여기서는 '수익 - (변동성 * 가중치)' 방식을 사용하여 안정성을 높입니다.
+            
+            # 현재 시장 상황(Regime)에 따른 리스크 가중치 가져오기
+            # 폭락장(2)일 때는 리스크를 더 크게 회피하도록 설정
+            risk_aversion = self.risk_lambdas.get(self.current_regime, 0.1) 
+            
+            # 변동성이 클수록 점수를 많이 깎음 (표준편차 * 가중치)
+            # *기존에는 분산(Variance)을 뺐지만, 샤프지수 개념에 맞춰 표준편차(Std Dev)를 사용*
+            risk_penalty = risk_aversion * port_std * 100 
 
-            # if t % 100 == 0:
-            # print(f"R: {reward:.5f} | Perf: {performance:.5f} | Risk: {risk_penalty:.5f} | Turn: {turnover_penalty:.5f}")
-                
-            return reward
+        # 3. 회전율 페널티 (거래비용 최소화)
+        turnover = getattr(self, 'turnover', 0.0)
+        turnover_penalty = 0.001 * turnover            
+        
+        # 4. 최종 보상 합산
+        # 수익은 챙기되(- risk), 너무 잦은 매매는 지양(- turnover)
+        reward = performance - risk_penalty - turnover_penalty
+
+        return reward
 
     def update_state(self, target_weights, cost_val):
 

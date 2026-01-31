@@ -153,7 +153,7 @@ def train():
     memory = Memory()
     
     # 5. 하이퍼파라미터
-    max_episodes = 400
+    max_episodes = 1000
     update_timestep = 1000
     timestep = 0
     
