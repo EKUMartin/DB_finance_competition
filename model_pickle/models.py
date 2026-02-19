@@ -11,17 +11,15 @@ class HMM_Model:
         
     def preprocess(self, df):
         """KOSPI 데이터프레임을 받아서 HMM 입력용 Feature로 변환"""
-        # Env에서 넘어오는 df는 컬럼명이 없을 수 있으므로 컬럼명 지정 필요
-        # Env에서 .values로 넘기지 말고 DataFrame으로 넘기거나, 여기서 생성
+
         if isinstance(df, np.ndarray):
             df = pd.DataFrame(df, columns=['Open', 'High', 'Low', 'Close', 'Volume', 'Change'])
             
         df = df.copy()
-        # 데이터가 너무 적으면 Rolling 계산 불가 (최소 20개 필요)
+
         if len(df) < 20:
             return None
 
-        # Feature Engineering (사용자님 로직 그대로)
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['MA20_slope'] = df['MA20'].pct_change()
         df['Disparity'] = (df['Close'] - df['MA20']) / df['MA20']
@@ -37,7 +35,7 @@ class HMM_Model:
         
         # 마지막 행(오늘)의 Feature만 추출
         feature_cols = ['MA20_slope', 'Disparity', 'Volatility', 'Vol_Change', 'Position']
-        last_row = df.iloc[[-1]][feature_cols].fillna(0) # NaNs 처리
+        last_row = df.iloc[[-1]][feature_cols].fillna(0) 
         
         return last_row.values
 
@@ -74,10 +72,7 @@ class PCA_Model:
 
     def calculate_ratios(self, row_data):
         """Raw 재무 데이터를 받아 15개 비율 계산"""
-        # 입력: [Netincome, Totalequity, ..., Noncurrentassets] 순서의 1차원 배열
-        # 편의상 딕셔너리 매핑 (인덱스 주의! Env에서 넘겨주는 순서와 일치해야 함)
-        # Env에서는 kor_bf에 12개 값을 넣어서 보냄
-        
+
         (Netincome, Totalequity, Totalassets, Operatingincome, Revenue, 
          Totalliabilities, Currentassets, Currentliabilities, Pretaxincome, 
          Retainedearnings, Noncurrentliabilities, Noncurrentassets) = row_data
@@ -131,24 +126,22 @@ class PCA_Model:
         
         # 2. Scaling (저장된 Scaler 사용)
         X_scaled = self.scaler.transform(X)
-        X_scaled = np.nan_to_num(X_scaled) # NaN 안전장치
+        X_scaled = np.nan_to_num(X_scaled) 
         
         # 3. PCA 변환
         pcs = self.pca.transform(X_scaled) # (N_stocks, 5)
-        
-        # 4. 포트폴리오 전체 평균 PC값 리턴 (Env 요구사항)
-        # 혹은 각 주식별 PC가 필요하면 pcs 그대로 리턴
+
         avg_pcs = np.mean(pcs, axis=0)
         
-        return avg_pcs[:4] # 4개만 쓴다면 슬라이싱
+        return avg_pcs[:4] # 4개만
 class Cov_Model:
     def __init__(self):
         pass
         
     def calculate_changes(self, price_series, vol_series):
         # 1. 가격 변화율
-        price_diff = price_series[1:] - price_series[:-1]
-        price_returns = price_diff / (price_series[:-1] + 1e-8)
+        price_diff = price_series[1:] - price_series[:-1]# 오늘-어제
+        price_returns = price_diff / (price_series[:-1] + 1e-8)#변화율/어제
         
         # 2. 거래량 변화율
         vol_diff = vol_series[1:] - vol_series[:-1]
@@ -176,8 +169,8 @@ class Cov_Model:
             if len(tick) < 2:
                 all_assets_vectors.append(np.zeros(38))
                 continue
-            prices = tick[:, 3]
-            volumes = tick[:, 4]
+            prices = tick[:, 0]
+            volumes = tick[:, 1]
             vec = self.calculate_changes(prices, volumes)
             all_assets_vectors.append(vec)
             
@@ -185,8 +178,7 @@ class Cov_Model:
             return np.zeros((1, 1))
 
         data_matrix = np.array(all_assets_vectors)
-        
-        # [🔥 수정] 경고 메시지 끄기 (Divide by Zero 무시)
+
         # 변동성이 0인 자산이 있어도 멈추지 않고 NaN 처리하도록 설정
         with np.errstate(divide='ignore', invalid='ignore'):
             corr_matrix = np.corrcoef(data_matrix)

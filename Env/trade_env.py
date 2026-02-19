@@ -2,163 +2,252 @@ from pathlib import Path
 import sys
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
+
 # environment 정의
 import numpy as np
+import os
 import pandas as pd
 import torch
 import random
-#reset/step/_is_done/record
-#record 저장 구조
+
 class Environment:
-    def __init__(self,time_window,budget,kor,us,kfb,kospi,pca_model,hmm_model,cov):
-        self._initial_budget=budget
-        self.budget=budget
-        self.pca_model=pca_model
-        self.hmm_model=hmm_model
-        self.cov_model=cov
-        self.kospi=kospi
-        self.us=us
-        self.kor=kor
-        self.kfb=kfb
-        self.risk_lambdas = {0: 0, 1: 0.00001, 2: 0.005}#안정,불안정, 폭락
+    def __init__(self, time_window, budget, kor, us, kfb, kospi, pca_model, hmm_model, cov):
+        self._initial_budget = budget
+        self.budget = budget
+        self.pca_model = pca_model
+        self.hmm_model = hmm_model
+        self.cov_model = cov
+        self.kospi = kospi
+        self.us = us
+        self.kor = kor
+        self.kfb = kfb
+        self.risk_lambdas = {0: 0, 1: 0.00001, 2: 0.005} # 안정, 불안정, 폭락
         self.current_regime = 0
-        unique_tickers=kor['Tick_id'].unique()
-        self.ticker_list=sorted(unique_tickers)
+        
+        unique_tickers = kor['Tick_id'].unique()
+        self.ticker_list = sorted(unique_tickers)
         self.portfolio_size = len(self.ticker_list)
-        us_tickers=us['Tick_id'].unique()
-        self.us_ticker_list=sorted(us_tickers)
-        self.us_ticker_size=len(self.us_ticker_list)
+        
+        us_tickers = us['Tick_id'].unique()
+        self.us_ticker_list = sorted(us_tickers)
+        self.us_ticker_size = len(self.us_ticker_list)
+        
         self.dates = sorted(kor['Date'].unique())
-        self.time_window=time_window
-        self._time_index=time_window
+        self.time_window = time_window
+        self._time_index = 2*time_window
+        
         self.kor_dict = dict(list(self.kor.groupby('Tick_id')))
         self.us_dict = dict(list(self.us.groupby('Tick_id')))
-        self.kfb_dict=dict(list(self.kfb.groupby('Tick_id')))
-        self.bool_init=True
-        self._done=False
+        self.kfb_dict = dict(list(self.kfb.groupby('Tick_id')))
+        
+        self.bool_init = True
+        self._done = False
+        self.current_episode = 1
         self.reset()
     
-    
-    def reset(self):#포트폴리오,리워드,observation,자산 초기화
-        self.portfolio_value=self._initial_budget
-        self.portfolio=np.zeros(self.portfolio_size,dtype=np.float32)
-        min_play_steps=2500
+    def reset(self):
+        self.portfolio_value = self._initial_budget
+        self.portfolio = np.zeros(self.portfolio_size, dtype=np.float32)
+        min_play_steps=1024
         last_possible_start = len(self.dates) - min_play_steps - 1
         self._time_index = random.randint(self.time_window,last_possible_start)
-        self.budget=self._initial_budget
+        self.budget = self._initial_budget
         self.observation = self._get_state()
-        self._done=False
-        self.reward=[0]
-        self.total_reward=[0]
+        self._done = False
+        self.reward = [0]
+        self.total_reward = [0]
+        self.trade_log = []
         return self.observation
 
-    
     def step(self, action):
         t = self._time_index
         t_next = t + 1
+        
         if t_next + 1 >= len(self.dates):
             total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
-            terminal_bonus =total_return * 100.0 
+            terminal_bonus = total_return * 100 if total_return>0 else total_return*10
             print(f"@@@완주!End of Data!@@@ Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
             info = {"reason": "end_of_data", "return": total_return}
+            self.save_log_to_csv()
             return self.observation, terminal_bonus, True, info
-        # -------------------------------------------------------
-        cost = self.cal_cost(action)
+            
+        # 1. Action 처리
+        action = np.clip(action, 0.0, 1.0)
+        if np.sum(action) > 0:
+            norm_action = action / np.sum(action)
+        else:
+            norm_action = np.zeros_like(action)
+            norm_action[0] = 1.0
+            
+        # 2. 존버(Hold) 판단
+        t_kor = self._time_index
+        current_prices = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
+        total_val = self.budget + np.sum(self.portfolio * current_prices)
         
-        earnings = self.cal_earnings(action)
+        if total_val > 0:
+            w_stock = (self.portfolio * current_prices) / total_val
+            w_cash = self.budget / total_val
+            w_old = np.concatenate(([w_cash], w_stock))
+        else:
+            w_old = np.zeros(self.portfolio_size + 1)
+            w_old[0] = 1.0
+            
+        turnover = np.sum(np.abs(norm_action - w_old)) / 2
+        is_hold = False
         
-        port_earnings = self.port_earnings(earnings)
-        
-        reward = self.get_reward(port_earnings, action)
+        # 3. 매매 실행
+        cost = self.cal_cost(norm_action)
+        earnings = self.cal_earnings(norm_action, is_hold)
+        port_earnings = self.port_earnings(earnings, total_val)
+        reward = self.get_reward(port_earnings, norm_action)
 
-
-
-        self.update_state(action, cost)
+        self.update_state(norm_action, cost, is_hold)
         
         self._time_index = t_next
         next_state = self._get_state()
-
         done = self._is_done()
-        
         
         if done:
             total_return = (self.portfolio_value - self._initial_budget) / self._initial_budget
-            terminal_bonus = total_return * 100
-            reward += terminal_bonus 
+            terminal_bonus = total_return*20
+            reward -= terminal_bonus 
+            self.save_log_to_csv()
             print(f"###파산!Bankrupt!### Return: {total_return*100:.2f}% | Bonus: {terminal_bonus:.2f}")
         
-        info = {}
-        return next_state, float(reward), bool(done), info
+        return next_state, float(reward), bool(done), {}
 
-    def _get_state(self):#입력된 시점의 상태 리턴
-        time_index=self._time_index
-        time_window=self.time_window
-        kor_features = []
+    def _get_state(self):
+        time_index = self._time_index
+        time_window = self.time_window
+        
+        # Target Columns
         kor_target_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        kospi_target_cols=['Open','High','Low','Close','Volume','Change' ]
-        us_target_cols=['Adj_close', 'Volume']
+        kospi_target_cols = ['Open','High','Low','Close','Volume','Change']
+        us_target_cols = ['Adj_close', 'Volume']
         fin_cols = [
             'Netincome', 'Totalequity', 'Totalassets', 'Operatingincome', 'Revenue',
             'Totalliabilities', 'Currentassets', 'Currentliabilities', 'PretaxIncome',
             'Retainedearnings', 'Noncurrentliabilities', 'Noncurrentassets'
         ]
-        # 기준 날짜
+        
+        # [중요] 기준 날짜 (한국 주식 거래일 기준)
         ko_now = self.dates[time_index]  
-
-        #미국 마지막 장 날짜    
-        matched_rows = self.us[self.us['Date'] <= ko_now]
+        ko_year = ko_now.year - 1
         
-        #미국 슬라이싱 범위
-        us_index = matched_rows.index[-1]
-        us_index_start=us_index-time_window
-        us_index_end=us_index
-        ko_year=ko_now.year-1
-        #HMM
-        kospi=self.kospi[time_index-time_window+1:time_index+1][kospi_target_cols].values    #HMM:Open,High,Low,Close,Volume,`Change` 데이터 준비
+        # ---------------------------------------------------------
+        # 1. KOSPI 데이터 날짜 매칭 수정 (치명적 버그 수정)
+        # ---------------------------------------------------------
+        # 기존: iloc 슬라이싱 (날짜 불일치 발생)
+        # 수정: ko_now 기준 마스킹
+        kospi_mask = self.kospi['Date'] <= ko_now
+        kospi_end_pos = kospi_mask.sum() # True 개수가 곧 마지막 인덱스+1
+        kospi_start_pos = max(0, kospi_end_pos - time_window)
         
-        #PCA 데이터 준비
-        kor_bf=[]
+        # HMM 모델용 데이터 (정확히 time_window 길이만큼 추출)
+        kospi = self.kospi.iloc[kospi_start_pos:kospi_end_pos][kospi_target_cols].values
+        
+        # ---------------------------------------------------------
+        # 2. PCA 데이터 준비 (재무제표)
+        # ---------------------------------------------------------
+        kor_bf = []
         for i in range(self.portfolio_size):
             ticker = self.ticker_list[i]
-            bf_data=self.kfb_dict[ticker]
+            bf_data = self.kfb_dict[ticker]
             bf_years = pd.to_datetime(bf_data['Date']).dt.year.values
             matching_indices = np.where(bf_years == int(ko_year))[0]
-            fin_values = bf_data.iloc[matching_indices[0]][fin_cols].values
+            if len(matching_indices) > 0:
+                fin_values = bf_data.iloc[matching_indices[0]][fin_cols].values
+            else:
+                fin_values = np.zeros(len(fin_cols))
             kor_bf.append(fin_values)
 
+        # ---------------------------------------------------------
+        # 3. 미국 데이터 준비 (날짜 매칭)
+        # ---------------------------------------------------------
+        us_tick = []
+        us_features = []
         
-        #cov,corr 데이터 준비
-        #미국 데이터
-        us_tick=[]
-        us_features=[]
         for i in range(self.us_ticker_size):
             ticker = self.us_ticker_list[i]
-            us_data=self.us_dict[ticker]
-            us_input=us_data.iloc[us_index_start:us_index_end][us_target_cols].values
+            us_data = self.us_dict[ticker]
+            
+            # 미국 데이터도 날짜 기준으로 슬라이싱
+            mask = us_data['Date'] < ko_now
+            end_pos = mask.sum()
+            start_pos = max(0, end_pos - time_window)
+            
+            us_input = us_data.iloc[start_pos:end_pos][us_target_cols].values
             us_tick.append(us_input)
+            
             if len(us_input) >= 2:
                 price_t = us_input[-1, 0]
                 price_prev = us_input[-2, 0]
                 price_chg = (price_t - price_prev) / (price_prev + 1e-8)
+                
                 vol_t = us_input[-1, 1]
                 vol_prev = us_input[-2, 1]
                 vol_chg = (vol_t - vol_prev) / (vol_prev + 1e-8)
+                
                 us_features.append([price_chg, vol_chg])
             else:
                 us_features.append([0.0, 0.0])
-        #한국 데이터
-        kor_tick=[]
+
+        # ---------------------------------------------------------
+        # 4. 한국 개별 주식 데이터 준비 (일관성 확보)
+        # ---------------------------------------------------------
+        # self.dates가 kor 데이터 기반이라 인덱싱이 대체로 맞지만, 
+        # 안전을 위해 여기도 날짜 기반으로 조회하거나, 
+        # 원본 로직(iloc)을 유지하되 time_index 정합성을 신뢰함.
+        # (self.dates 생성 시 이미 필터링된 데이터라고 가정)
+        
+        kor_tick = []
+        kor_features = []
         for i in range(self.portfolio_size):
             ticker = self.ticker_list[i]
-            kor_data=self.kor_dict[ticker]
-            kor_input=kor_data.iloc[time_index-time_window+1:time_index+1][kor_target_cols].values
+            kor_data = self.kor_dict[ticker]
+            
+            # 여기서도 원칙적으로는 날짜 마스킹이 가장 안전하지만, 
+            # self.dates 구성 로직상 순서가 보장된다면 아래 코드도 유효합니다.
+            # 데이터 누락 방지를 위해 안전장치 추가 (KOSPI와 동일 로직 적용 권장)
+            
+            # kor_data는 이미 Tick_id별로 묶여있으므로, time_index 위치가 
+            # self.dates의 날짜와 정확히 일치해야 함.
+            kor_input = kor_data.iloc[time_index-time_window+1:time_index+1][kor_target_cols].values
+            
             kor_tick.append(kor_input)
-            kor_features.append(kor_input[-1])
-        #모델 실행
-        regime=self.hmm_model(kospi)
+            
+            if len(kor_input) >= 2:
+                close_t = kor_input[-1, 3]   
+                close_prev = kor_input[-2, 3]
+                price_chg = (close_t - close_prev) / (close_prev + 1e-8)
+
+                vol_t = kor_input[-1, 4] 
+                vol_prev = kor_input[-2, 4]
+                vol_chg = (vol_t - vol_prev) / (vol_prev + 1e-8)
+    
+                kor_features.append([price_chg, vol_chg]) 
+            else:
+                kor_features.append([0.0, 0.0])
+                
+        # ---------------------------------------------------------
+        # 5. 모델 실행
+        # ---------------------------------------------------------
+        regime = self.hmm_model(kospi)
         self.current_regime = int(regime)
-        pca=self.pca_model(kor_bf)
-        cov=self.cov_model(us_tick,kor_tick)
+        pca_list = []
+        for bf in kor_bf:
+            single_pca = self.pca_model([bf])
+            if isinstance(single_pca, torch.Tensor):
+                pca_list.append(single_pca.detach().cpu().numpy().flatten())
+            else:
+                pca_list.append(np.array(single_pca).flatten())
+        pca = np.array(pca_list)
+        # pca = self.pca_model(kor_bf)
+        kor_tick_aligned = [k[:, [3, 4]] for k in kor_tick]
+
+        cov = self.cov_model(us_tick, kor_tick_aligned)
+        
+        # 현재가 조회 (포트폴리오 평가용)
         temp_current_prices = []
         for i in range(self.portfolio_size):
             ticker = self.ticker_list[i]
@@ -166,17 +255,15 @@ class Environment:
             temp_current_prices.append(price)
         temp_current_prices = np.array(temp_current_prices)
         
-        # 현재 평가액 계산
+        # 현재 평가액 및 비중 계산
         stock_val = np.sum(self.portfolio * temp_current_prices)
         total_val = self.budget + stock_val
         
-        # 비중 계산 (이걸 넘겨줘야 모델이 이해함)
         if total_val > 0:
             w_stock = (self.portfolio * temp_current_prices) / total_val
             w_cash = self.budget / total_val
             current_weights = np.concatenate(([w_cash], w_stock))
         else:
-            # 파산 시 현금 100% 처리
             current_weights = np.zeros(self.portfolio_size + 1)
             current_weights[0] = 1.0
 
@@ -186,45 +273,31 @@ class Environment:
             'cov': cov,
             'kor_feat': kor_features,
             'us_feat': us_features,
-            'weights': current_weights, # [중요] 주식 수가 아니라 비중을 넘김
+            'weights': current_weights,
         }
         return state
     
-    def _is_done(self): #파산했는지 확인)
-        if self.portfolio_value < self._initial_budget * 0.5:
+    def _is_done(self):
+        if self.portfolio_value < self._initial_budget * 0.3:
             return True
         return False
     
-    # def record(self):#action, reward DB에 저장
-        
-    
-
-    # def trans_actions(action):#action 포트폴리오 비중으로 변환
-    #     trans_actions=0
-    #     return trans_actions
-    
-    def port_earnings(self,earnings):#portfolio 수익 계산
-        v_old = self.portfolio_value
+    def port_earnings(self, earnings, current_total_val):
+        v_old = current_total_val
         v_new = v_old + earnings
         if v_old <= 0 or v_new <= 0:
             performance = 0
         else:
             performance = np.log(v_new / v_old)
         return performance
-    def cal_cost(self, action): 
-        t = self._time_index + 1
-        current_prices = []
-        for i in range(self.portfolio_size):
-            ticker = self.ticker_list[i]
-            price = self.kor_dict[ticker].iloc[t]['Close']
-            current_prices.append(price)
-        current_prices = np.array(current_prices)
+
+    def cal_cost(self, norm_action): 
+        t_kor = self._time_index
+        current_prices = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
         
-        # 현재 포트폴리오 가치 계산
         stock_val = np.sum(self.portfolio * current_prices)
         total_val = self.budget + stock_val
         
-        # 1. 현재 비중(w_old) 계산
         if total_val > 0:
             w_stock = (self.portfolio * current_prices) / total_val 
             w_cash = self.budget / total_val                    
@@ -232,147 +305,126 @@ class Environment:
         else:
             w_old = np.zeros(self.portfolio_size + 1)
      
-        diff = w_old - action 
+        diff = w_old - norm_action 
+        log_row = {
+            'Episode': self.current_episode,
+            'Date': self.dates[self._time_index], 
+            'Total_Turnover': np.sum(np.abs(diff))/2,
+            'Portfolio_Value': self.budget + np.sum(self.portfolio * current_prices)
+        }
+        
+        log_row['Cash_Diff'] = diff[0]
+        log_row['Cash_Weight'] = norm_action[0]
+        
+        for i, ticker in enumerate(self.ticker_list):
+            log_row[f'{ticker}_Diff'] = diff[i+1]
+            log_row[f'{ticker}_Weight'] = norm_action[i+1]
+            
+        self.trade_log.append(log_row)
         stock_diff = diff[1:] 
         
-        # 회전율 계산
         raw_turnover = np.sum(np.abs(stock_diff)) / 2
-        
-        # 노이즈 필터링
-        if raw_turnover < 0.03: 
-            self.turnover = 0.0
-        else:
-            self.turnover = raw_turnover
-    
-        # 비용 계산
-        cost = total_val * 0.002 * self.turnover
+        self.turnover = raw_turnover
+        cost = total_val * 0.00215 * self.turnover 
         return cost
 
     def get_reward(self, port_earnings, action):
-        # 1. 기본 수익률 보상 (기존 로직 유지)
-        if port_earnings < 0:
-            performance = port_earnings * 10
-        else:
-            performance = port_earnings * 10
-
-        # 2. 리스크 페널티 계산 (샤프 지수 개념 도입)
-        # -----------------------------------------------------------
+        performance = port_earnings * 100
+        
+        current_lambda = self.risk_lambdas.get(self.current_regime, 0)
+        
         t = self._time_index + 1
         w = self.time_window
-        stock_weights = action[1:] # 주식 비중만 추출
-        
-        # 과거 w 기간 동안의 수익률 데이터 준비
+        stock_weights = action[1:] 
+
         price_history = []
         for i in range(self.portfolio_size):
             ticker = self.ticker_list[i]
-            # t 시점까지의 과거 데이터 슬라이싱
             start_idx = max(0, t - w)
             prices = self.kor_dict[ticker].iloc[start_idx : t]['Close'].values
             price_history.append(prices)
-            
+        
         price_history = np.array(price_history).T
-        
-        # 일별 수익률 계산
-        returns_hist = (price_history[1:] - price_history[:-1]) / (price_history[:-1] + 1e-8)
-        
-        risk_penalty = 0.0
-        
+        if len(price_history) > 1:
+            returns_hist = (price_history[1:] - price_history[:-1]) / (price_history[:-1] + 1e-8)
+        else:
+            returns_hist = np.zeros_like(price_history)
+
         if returns_hist.shape[0] > 1:
-            # (1) 공분산 행렬 계산
             cov_matrix = np.cov(returns_hist, rowvar=False)
-            
-            # (2) 포트폴리오 분산 (Variance) = w^T * Cov * w
             port_variance = np.dot(stock_weights.T, np.dot(cov_matrix, stock_weights))
-            
-            # (3) 포트폴리오 표준편차 (Volatility)
-            port_std = np.sqrt(port_variance + 1e-8)
-            
-            # [핵심 변경] Sharpe Ratio 스타일 보상
-            # 수익률(performance)을 표준편차(port_std)로 나누거나, 표준편차에 페널티를 강하게 줌
-            # 여기서는 '수익 - (변동성 * 가중치)' 방식을 사용하여 안정성을 높입니다.
-            
-            # 현재 시장 상황(Regime)에 따른 리스크 가중치 가져오기
-            # 폭락장(2)일 때는 리스크를 더 크게 회피하도록 설정
-            risk_aversion = self.risk_lambdas.get(self.current_regime, 0.1) 
-            
-            # 변동성이 클수록 점수를 많이 깎음 (표준편차 * 가중치)
-            # *기존에는 분산(Variance)을 뺐지만, 샤프지수 개념에 맞춰 표준편차(Std Dev)를 사용*
-            risk_penalty = risk_aversion * port_std * 100 
-
-        # 3. 회전율 페널티 (거래비용 최소화)
+            risk_penalty = current_lambda * port_variance*100.0
+        else:
+            risk_penalty = 0.0
+                        
         turnover = getattr(self, 'turnover', 0.0)
-        turnover_penalty = 0.001 * turnover            
+        turnover_penalty = turnover * 0.00215 *100
         
-        # 4. 최종 보상 합산
-        # 수익은 챙기되(- risk), 너무 잦은 매매는 지양(- turnover)
-        reward = performance - risk_penalty - turnover_penalty
-
+        reward = performance - turnover_penalty# -risk_penalty
         return reward
 
-    def update_state(self, target_weights, cost_val):
-
-        t = self._time_index + 1
-        current_prices = []
-        for i in range(self.portfolio_size):
-            ticker = self.ticker_list[i]
-            price = self.kor_dict[ticker].iloc[t]['Close']
-            current_prices.append(price)
-        current_prices = np.array(current_prices)
+    def update_state(self, target_weights, cost_val, is_hold=False):
+        t_kor = self._time_index
+        prices_t = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
         
+        if is_hold:
+            self.portfolio_value = self.budget + np.sum(self.portfolio * prices_t)
+            return
 
-        if cost_val == 0.0:
-            stock_val = np.sum(self.portfolio * current_prices)
-            self.portfolio_value = self.budget + stock_val
-            return 
-
-        total_val = self.budget + np.sum(self.portfolio * current_prices)
-        available_value = total_val - cost_val
+        total_val_t = self.budget + np.sum(self.portfolio * prices_t)
+        available_value = total_val_t - cost_val
 
         target_stock_w = target_weights[1:]
-        
-
         target_stock_amounts = available_value * target_stock_w
         
-    
-        new_portfolio_shares = np.floor(target_stock_amounts / (current_prices + 1e-8))
+        new_portfolio_shares = np.floor(target_stock_amounts / (prices_t + 1e-8))
+        stock_buy_value = np.sum(new_portfolio_shares * prices_t)
         
-       
-        stock_buy_value = np.sum(new_portfolio_shares * current_prices)
         self.budget = available_value - stock_buy_value
         self.portfolio = new_portfolio_shares
         
-        # 포트폴리오 가치 갱신
         self.portfolio_value = self.budget + stock_buy_value
 
-    def cal_earnings(self, action):
-
-        t = self._time_index + 1
-        current_prices = []
-        next_prices = []
-        for i in range(self.portfolio_size):
-            ticker = self.ticker_list[i]
-            current_prices.append(self.kor_dict[ticker].iloc[t]['Close'])
-            next_prices.append(self.kor_dict[ticker].iloc[t+1]['Close'])
+    def cal_earnings(self, norm_action, is_hold=False):#내일 종가를 보고 오늘 행동에 대한 수익을 얻음
+        t_kor = self._time_index 
+        t_kor_next = t_kor + 1
+        
+        if t_kor_next >= len(self.dates):
+            return 0
             
-        current_prices = np.array(current_prices)
-        next_prices = np.array(next_prices)
+        prices_t = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
+        prices_t_next = np.array([self.kor_dict[tk].iloc[t_kor_next]['Close'] for tk in self.ticker_list])
         
-    
-        stock_weights = action[1:]
-        cash_weight = action[0]
+        current_total_val = self.budget + np.sum(self.portfolio * prices_t)
         
-        current_total_val = self.portfolio_value
-        
-        # 주식 수익
-        target_stock_amt = current_total_val * stock_weights
-        target_stocks = np.floor(target_stock_amt / (current_prices + 1e-8))
-        stock_future_val = np.sum(target_stocks * next_prices)
-        
-        # 현금 수익 (이자율 0 가정, 그대로 유지)
-        cash_future_val = current_total_val * cash_weight 
-        
-        total_future_val = stock_future_val + cash_future_val
-        
+        if is_hold:
+            stock_future_val = np.sum(self.portfolio * prices_t_next)
+            cash_future_val = self.budget
+            return (stock_future_val + cash_future_val) - current_total_val
 
+        cash_weight = norm_action[0]
+        stock_weights = norm_action[1:]
         
-        return total_future_val - current_total_val
+        target_stock_amt = current_total_val * stock_weights
+        target_stocks = np.floor(target_stock_amt / (prices_t + 1e-8))
+        actual_stock_cost = target_stocks * prices_t
+        remainder = target_stock_amt - actual_stock_cost 
+        
+        stock_future_val = np.sum(target_stocks * prices_t_next)
+        cash_future_val = (current_total_val * cash_weight) + np.sum(remainder)
+        
+        return (stock_future_val + cash_future_val) - current_total_val
+
+    def save_log_to_csv(self):
+        if len(self.trade_log) == 0:
+            return
+            
+        filename = "all_trade_log.csv"
+        df = pd.DataFrame(self.trade_log)
+        
+        if not os.path.exists(filename):
+            df.to_csv(filename, index=False, mode='w', encoding='utf-8-sig')
+        else:
+            df.to_csv(filename, index=False, mode='a', header=False, encoding='utf-8-sig')
+            
+        print(f" >> 💾 매매 기록 저장 완료 (-> {filename})")
