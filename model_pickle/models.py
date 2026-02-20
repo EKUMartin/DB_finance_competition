@@ -25,8 +25,8 @@ class HMM_Model:
         df['Disparity'] = (df['Close'] - df['MA20']) / df['MA20']
         df['Volatility'] = df['Change'].rolling(window=20).std()
         
-        vol_v1 = df['Volume'].shift(2)
-        vol_v2 = df['Volume'].shift(1)
+        vol_v1 = df['Volume'].shift(1)
+        vol_v2 = df['Volume']
         # 0으로 나누기 방지
         df['Vol_Change'] = np.where(vol_v1 == 0, 0, (vol_v1 - vol_v2) / vol_v1)
         

@@ -19,8 +19,8 @@ def features(df):
     df['MA20_slope']=df['MA20'].pct_change()
     df['Disparity'] = (df['Close'] - df['MA20']) / df['MA20']
     df['Volatility'] = df['Change'].rolling(window=20).std()
-    vol_v1 = df['Volume'].shift(2)
-    vol_v2 = df['Volume'].shift(1)
+    vol_v1 = df['Volume'].shift(1)
+    vol_v2 = df['Volume']
     df['Vol_Change'] = np.where(vol_v1==0,0,(vol_v1 - vol_v2) / vol_v1)
     denominator=df["High"]-df["Low"]
     df['Position']=np.where(denominator==0,0, (df["Close"]-df["Low"])/(denominator))

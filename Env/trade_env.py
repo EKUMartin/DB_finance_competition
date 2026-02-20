@@ -292,8 +292,8 @@ class Environment:
         return performance
 
     def cal_cost(self, norm_action): 
-        t_kor = self._time_index
-        current_prices = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
+        t_kor = self._time_index+1
+        current_prices = np.array([self.kor_dict[tk].iloc[t_kor]['Open'] for tk in self.ticker_list])
         
         stock_val = np.sum(self.portfolio * current_prices)
         total_val = self.budget + stock_val
@@ -364,28 +364,33 @@ class Environment:
         return reward
 
     def update_state(self, target_weights, cost_val, is_hold=False):
-        t_kor = self._time_index
-        prices_t = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
+        t_next = self._time_index+1
+        prices_next_open = np.array([self.kor_dict[tk].iloc[t_next]['Open'] for tk in self.ticker_list])
+        prices_next_close = np.array([self.kor_dict[tk].iloc[t_next]['Close'] for tk in self.ticker_list])
         
         if is_hold:
-            self.portfolio_value = self.budget + np.sum(self.portfolio * prices_t)
+            self.portfolio_value = self.budget + np.sum(self.portfolio * prices_next_close)
             return
 
-        total_val_t = self.budget + np.sum(self.portfolio * prices_t)
-        available_value = total_val_t - cost_val
+        # 내일 시가 기준으로 총 자산 평가 (여기서 수수료 차감)
+        total_val_open = self.budget + np.sum(self.portfolio * prices_next_open)
+        available_value = total_val_open - cost_val 
 
         target_stock_w = target_weights[1:]
         target_stock_amounts = available_value * target_stock_w
         
-        new_portfolio_shares = np.floor(target_stock_amounts / (prices_t + 1e-8))
-        stock_buy_value = np.sum(new_portfolio_shares * prices_t)
+        # 내일 '시가(Open)'로 주식 매수 (소수점 이하 버림)
+        new_portfolio_shares = np.floor(target_stock_amounts / (prices_next_open + 1e-8))
+        stock_buy_value = np.sum(new_portfolio_shares * prices_next_open)
         
+        # 잔여 현금 및 포트폴리오 상태 업데이트
         self.budget = available_value - stock_buy_value
         self.portfolio = new_portfolio_shares
         
-        self.portfolio_value = self.budget + stock_buy_value
+        # 다음 스텝(t+1)으로 넘어가기 전, 최종 포트폴리오 가치는 내일 '종가(Close)' 기준으로 세팅
+        self.portfolio_value = self.budget + np.sum(self.portfolio * prices_next_close)
 
-    def cal_earnings(self, norm_action, is_hold=False):#내일 종가를 보고 오늘 행동에 대한 수익을 얻음
+    def cal_earnings(self, norm_action, is_hold=False):#내일 종가를 보고 내일 시가 행동에 대한 수익을 얻음
         t_kor = self._time_index 
         t_kor_next = t_kor + 1
         
@@ -394,9 +399,9 @@ class Environment:
             
         prices_t = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
         prices_t_next = np.array([self.kor_dict[tk].iloc[t_kor_next]['Close'] for tk in self.ticker_list])
-        
+        prices_next_open=prices_next_open = np.array([self.kor_dict[tk].iloc[t_kor_next]['Open'] for tk in self.ticker_list])
         current_total_val = self.budget + np.sum(self.portfolio * prices_t)
-        
+        val_at_open=self.budget + np.sum(self.portfolio * prices_next_open)
         if is_hold:
             stock_future_val = np.sum(self.portfolio * prices_t_next)
             cash_future_val = self.budget
@@ -405,13 +410,13 @@ class Environment:
         cash_weight = norm_action[0]
         stock_weights = norm_action[1:]
         
-        target_stock_amt = current_total_val * stock_weights
-        target_stocks = np.floor(target_stock_amt / (prices_t + 1e-8))
-        actual_stock_cost = target_stocks * prices_t
-        remainder = target_stock_amt - actual_stock_cost 
+        target_stock_amt = val_at_open * stock_weights
+        target_stocks = np.floor(target_stock_amt / (prices_next_open + 1e-8))
+        actual_stock_cost = target_stocks * prices_next_open
+        remainder = target_stock_amt - actual_stock_cost
         
         stock_future_val = np.sum(target_stocks * prices_t_next)
-        cash_future_val = (current_total_val * cash_weight) + np.sum(remainder)
+        cash_future_val = (val_at_open * cash_weight) + np.sum(remainder)
         
         return (stock_future_val + cash_future_val) - current_total_val
 
