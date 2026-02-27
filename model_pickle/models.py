@@ -20,7 +20,7 @@ class HMM_Model:
         vol_v1 = df['Volume'].shift(1)
         vol_v2 = df['Volume']
         # 0으로 나누기 방지
-        df['Vol_Change'] = np.where(vol_v1 == 0, 0, (vol_v1 - vol_v2) / vol_v1)  
+        df['Vol_Change'] = np.where(vol_v1 == 0, 0, (vol_v2 - vol_v1) / vol_v1)  
         denominator = df["High"] - df["Low"]
         df['Position'] = np.where(denominator == 0, 0, (df["Close"] - df["Low"]) / denominator)
         # 마지막 행(오늘)의 Feature만 추출
