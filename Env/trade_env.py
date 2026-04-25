@@ -79,7 +79,7 @@ class Environment:
             norm_action = np.zeros_like(action)
             norm_action[0] = 1.0
             
-        # 2. 존버(Hold) 판단
+        # 2. Hold 판단
         t_kor = self._time_index
         current_prices = np.array([self.kor_dict[tk].iloc[t_kor]['Close'] for tk in self.ticker_list])
         total_val = self.budget + np.sum(self.portfolio * current_prices)
